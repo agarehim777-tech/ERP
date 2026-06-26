@@ -359,6 +359,15 @@ const server = createServer(async (req, res) => {
 
   try {
     const url = new URL(req.url || "/", `http://${req.headers.host || "127.0.0.1"}`);
+    if (req.method === "GET" && url.pathname === "/healthz") {
+      res.writeHead(200, {
+        "Content-Type": "text/plain; charset=utf-8",
+        "Cache-Control": "no-store",
+      });
+      res.end("ok");
+      return;
+    }
+
     if (req.method === "GET" && url.pathname === "/api/health") {
       const hasBootstrapUser = Boolean(await store.get("SELECT id FROM users LIMIT 1"));
       json(res, 200, { status: "ok", provider: store.provider, hasBootstrapUser });

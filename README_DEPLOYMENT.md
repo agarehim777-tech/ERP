@@ -51,6 +51,32 @@ npm.cmd run build:pages
 
 `DATABASE_URL` frontend-ə, GitHub Pages env-lərinə və ya `VITE_` dəyişənlərinə yazılmır.
 
+### Render API service
+
+Render-də backend üçün static frontend Dockerfile deyil, Node API servisi işləməlidir.
+
+Variant A - Native Node Web Service:
+
+- Build command: `npm ci`
+- Start command: `npm run api`
+- Health check path: `/api/health`
+
+Variant B - Docker Web Service:
+
+- Dockerfile path: `Dockerfile.api`
+- Health check path: `/healthz`
+
+Env-lər:
+
+```text
+DATABASE_URL=Neon connection string
+ERP_BOOTSTRAP_EMAIL=Agarehim777@gmail.com
+ERP_BOOTSTRAP_PASSWORD=Agarehim1996
+ERP_CORS_ORIGIN=https://agarehim777-tech.github.io
+```
+
+Əgər `/api/health` HTML qaytarırsa, Render servisi API yox, static frontend kimi qalxıb. Bu halda service settings-də runtime/start command və ya Dockerfile path-i yuxarıdakı kimi dəyişin.
+
 `smoke:prod` build olunmus `dist` qovlugunu 127.0.0.1:4173-de acir, 25 modulu, Settings integrity/go-live axinlarini ve mobil overflow-u yoxlayir.
 
 ## Public build environment
