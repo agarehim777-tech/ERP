@@ -2127,10 +2127,41 @@ function mergeRoles(savedRoles = []) {
   });
 }
 
+function uniqueModuleIds(moduleIds = []) {
+  const validIds = new Set(navItems.map((item) => item.id));
+  return [...new Set(moduleIds)].filter((id) => validIds.has(id));
+}
+
+function getDefaultModuleAccessForRole(roleName, roles = defaultRoles) {
+  const role = roles.find((item) => item.name === roleName) || roles[0] || defaultRoles[0];
+  if (role?.name === "Super Admin") return navItems.map((item) => item.id);
+
+  const permissions = new Set(role?.permissions || []);
+  return uniqueModuleIds(
+    navItems
+      .filter((item) => {
+        const permission = navPermissionByType[item.id];
+        return !permission || permissions.has(permission);
+      })
+      .map((item) => item.id),
+  );
+}
+
+function normalizeUserModuleAccess(user, roles) {
+  const moduleAccess = Array.isArray(user.moduleAccess)
+    ? uniqueModuleIds(user.moduleAccess)
+    : getDefaultModuleAccessForRole(user.role, roles);
+
+  return moduleAccess.length > 0 ? moduleAccess : ["dashboard"];
+}
+
 function ensureSettings(settings = {}) {
   const baseSettings = initialState.settings || {};
   const roles = mergeRoles(Array.isArray(settings.roles) ? settings.roles : []);
-  const users = mergeUsers(Array.isArray(settings.users) ? settings.users : baseSettings.users || []);
+  const users = mergeUsers(Array.isArray(settings.users) ? settings.users : baseSettings.users || []).map((user) => ({
+    ...user,
+    moduleAccess: normalizeUserModuleAccess(user, roles),
+  }));
   const fallbackUser = users.find((user) => user.status === "Aktiv") || users[0] || null;
   const sessionUserId =
     settings.sessionUserId === null
@@ -2247,6 +2278,14 @@ function hasRolePermission(settings, permission) {
   if (!getCurrentUser(settings)) return false;
   const role = getActiveRole(settings);
   return Array.isArray(role?.permissions) && role.permissions.includes(permission);
+}
+
+function hasUserModuleAccess(settings, moduleId) {
+  if (!moduleId) return true;
+  const user = getCurrentUser(settings);
+  if (!user) return false;
+  if (user.role === "Super Admin") return true;
+  return normalizeUserModuleAccess(user, ensureSettings(settings).roles).includes(moduleId);
 }
 
 function buildAuditEntry({ module, action, detail, status = "Tamamlandı", role = "System" }) {
@@ -2750,9 +2789,31 @@ const navPermissionByType = {
   help: null,
 };
 
+const modulePermissionCatalog = navItems.map((item) => ({
+  ...item,
+  permission: navPermissionByType[item.id] || null,
+}));
+
+const permissionModuleOverrides = {
+  "system.backup": "settings",
+  "settings.manage": "settings",
+  "vendors.po": "vendors",
+};
+
+function getModuleForPermission(permission) {
+  if (!permission) return null;
+  if (permissionModuleOverrides[permission]) return permissionModuleOverrides[permission];
+  return modulePermissionCatalog.find((item) => item.permission === permission)?.id || null;
+}
+
+function hasEffectivePermission(settings, permission) {
+  if (!hasRolePermission(settings, permission)) return false;
+  return hasUserModuleAccess(settings, getModuleForPermission(permission));
+}
+
 function canAccessNavItem(settings, id) {
   const permission = navPermissionByType[id];
-  return !permission || hasRolePermission(settings, permission);
+  return hasUserModuleAccess(settings, id) && (!permission || hasRolePermission(settings, permission));
 }
 
 function App() {
@@ -3086,7 +3147,7 @@ function App() {
   }
 
   function can(permission) {
-    return hasRolePermission(state.settings, permission);
+    return hasEffectivePermission(state.settings, permission);
   }
 
   function requirePermission(permission, action) {
@@ -3266,6 +3327,14 @@ function App() {
     const userName = String(values.name || "").trim();
     const email = String(values.email || "").trim();
     const role = values.role || defaultRoles[0].name;
+    const roleOptions = state.settings.roles || defaultRoles;
+    const moduleAccess = normalizeUserModuleAccess(
+      {
+        role,
+        moduleAccess: Array.isArray(values.moduleAccess) ? values.moduleAccess : undefined,
+      },
+      roleOptions,
+    );
 
     if (!userName || !email) {
       notify("İstifadəçi adı və email daxil edin.", "warning");
@@ -3278,6 +3347,7 @@ function App() {
       email,
       role,
       status: "Aktiv",
+      moduleAccess,
     };
 
     if (remoteApiEnabled) {
@@ -3288,7 +3358,7 @@ function App() {
       }
       try {
         const remote = await createRemoteUser({ ...user, password });
-        user = remote.user;
+        user = { ...remote.user, moduleAccess };
       } catch (error) {
         notify(error instanceof Error ? error.message : "İstifadəçi yaradılmadı.", "warning");
         return;
@@ -3336,6 +3406,39 @@ function App() {
           module: "Ayarlar/Auth",
           action: "İstifadəçi statusu dəyişdi",
           detail: `${userId}: ${status}`,
+        },
+      );
+    });
+  }
+
+  function toggleUserModuleAccess(userId, moduleId) {
+    if (!requirePermission("settings.manage", "istifadÉ™Ã§i modul icazÉ™sini dÉ™yiÅŸmÉ™k")) return;
+
+    setState((current) => {
+      const users = current.settings.users || [];
+      const targetUser = users.find((user) => user.id === userId);
+      if (!targetUser || targetUser.role === "Super Admin") return current;
+
+      const currentAccess = normalizeUserModuleAccess(targetUser, current.settings.roles || defaultRoles);
+      const nextAccess = currentAccess.includes(moduleId)
+        ? currentAccess.filter((id) => id !== moduleId)
+        : [...currentAccess, moduleId];
+      const safeAccess = nextAccess.length > 0 ? nextAccess : ["dashboard"];
+
+      return auditCurrentState(
+        {
+          ...current,
+          settings: {
+            ...current.settings,
+            users: users.map((user) =>
+              user.id === userId ? { ...user, moduleAccess: safeAccess } : user,
+            ),
+          },
+        },
+        {
+          module: "Ayarlar/Auth",
+          action: "Modul icazÉ™si dÉ™yiÅŸdi",
+          detail: `${targetUser.name}: ${moduleId}`,
         },
       );
     });
@@ -5805,7 +5908,9 @@ function App() {
           settings: {
             ...current.settings,
             users: (current.settings.users || []).map((user) =>
-              user.id === current.settings.sessionUserId ? { ...user, role: roleName } : user,
+              user.id === current.settings.sessionUserId
+                ? { ...user, role: roleName, moduleAccess: getDefaultModuleAccessForRole(roleName, current.settings.roles || defaultRoles) }
+                : user,
             ),
             currentRole: roleName,
           },
@@ -5887,8 +5992,8 @@ function App() {
           unread={state.notifications.filter((item) => item.unread).length}
           messages={state.conversations.reduce((sum, item) => sum + item.unread, 0)}
           onMenu={() => setMobileNav(true)}
-          onMessages={() => setActive("messages")}
-          onNotifications={() => setActive("notifications")}
+          onMessages={() => choosePage("messages")}
+          onNotifications={() => choosePage("notifications")}
           currentUser={currentUser}
           activeRole={activeRoleInfo}
           users={state.settings.users || []}
@@ -6093,6 +6198,7 @@ function App() {
               goLiveReport={goLiveReport}
               goLiveSnapshot={state.goLiveSnapshot}
               permissionCatalog={permissionCatalog}
+              modulePermissionCatalog={modulePermissionCatalog}
               toggleSetting={toggleSetting}
               updateCompany={updateCompany}
               onSaveSettings={saveSettings}
@@ -6100,6 +6206,7 @@ function App() {
               users={state.settings.users || []}
               onCreateUser={createUser}
               onUpdateUserStatus={updateUserStatus}
+              onToggleUserModule={toggleUserModuleAccess}
               onRunIntegrityCheck={runIntegrityCheck}
               onRunGoLiveCheck={runGoLiveCheck}
               onExportBackup={exportBackup}
@@ -11905,6 +12012,7 @@ function SettingsPage({
   goLiveReport = {},
   goLiveSnapshot = null,
   permissionCatalog = [],
+  modulePermissionCatalog = [],
   users = [],
   toggleSetting,
   updateCompany,
@@ -11912,6 +12020,7 @@ function SettingsPage({
   onChangeRole,
   onCreateUser,
   onUpdateUserStatus,
+  onToggleUserModule,
   onRunIntegrityCheck,
   onRunGoLiveCheck,
   onExportBackup,
@@ -11924,6 +12033,7 @@ function SettingsPage({
     email: "",
     password: "",
     role: activeRole?.name || defaultRoles[0].name,
+    moduleAccess: getDefaultModuleAccessForRole(activeRole?.name || defaultRoles[0].name, defaultRoles),
   });
   const integrations = [
     ["AKB", "Müştəri kredit tarixçəsi sorğusu", "Aktiv"],
@@ -11958,6 +12068,28 @@ function SettingsPage({
       email: "",
       password: "",
       role: roles[0]?.name || defaultRoles[0].name,
+      moduleAccess: getDefaultModuleAccessForRole(roles[0]?.name || defaultRoles[0].name, roles),
+    });
+  }
+
+  function changeDraftRole(roleName) {
+    setUserDraft((current) => ({
+      ...current,
+      role: roleName,
+      moduleAccess: getDefaultModuleAccessForRole(roleName, roles),
+    }));
+  }
+
+  function toggleDraftModule(moduleId) {
+    setUserDraft((current) => {
+      const currentAccess = uniqueModuleIds(current.moduleAccess || []);
+      const nextAccess = currentAccess.includes(moduleId)
+        ? currentAccess.filter((id) => id !== moduleId)
+        : [...currentAccess, moduleId];
+      return {
+        ...current,
+        moduleAccess: nextAccess.length > 0 ? nextAccess : ["dashboard"],
+      };
     });
   }
 
@@ -12046,28 +12178,58 @@ function SettingsPage({
             <span>Rol</span>
             <select
               value={userDraft.role}
-              onChange={(event) => setUserDraft((current) => ({ ...current, role: event.target.value }))}
+              onChange={(event) => changeDraftRole(event.target.value)}
             >
               {roles.map((role) => (
                 <option key={role.name}>{role.name}</option>
               ))}
             </select>
           </label>
+          <div className="user-module-picker">
+            <span>Modul icazələri</span>
+            <div className="module-access-grid compact">
+              {modulePermissionCatalog.map((module) => (
+                <label key={`draft-${module.id}`} className="module-access-check">
+                  <input
+                    type="checkbox"
+                    checked={(userDraft.moduleAccess || []).includes(module.id)}
+                    onChange={() => toggleDraftModule(module.id)}
+                  />
+                  <span>{module.label}</span>
+                </label>
+              ))}
+            </div>
+          </div>
           <button className="primary-btn" type="submit">
             <Plus size={16} />
             İstifadəçi yarat
           </button>
         </form>
         <DataTable
-          columns={["İstifadəçi", "Rol", "Scope", "Status", "Əməliyyat"]}
+          columns={["İstifadəçi", "Rol", "Scope", "Modullar", "Status", "Əməliyyat"]}
           rows={users.map((user) => {
             const role = roles.find((item) => item.name === user.role);
             const isCurrent = user.id === settings.sessionUserId;
+            const userModuleAccess = normalizeUserModuleAccess(user, roles);
+            const isSuperAdmin = user.role === "Super Admin";
 
             return [
               <TwoLine title={user.name} subtitle={user.email} />,
               <StatusBadge status={user.role} />,
               role?.scope || "Scope yoxdur",
+              <div className="module-access-grid">
+                {modulePermissionCatalog.map((module) => (
+                  <label key={`${user.id}-${module.id}`} className="module-access-check">
+                    <input
+                      type="checkbox"
+                      checked={isSuperAdmin || userModuleAccess.includes(module.id)}
+                      disabled={isSuperAdmin}
+                      onChange={() => onToggleUserModule(user.id, module.id)}
+                    />
+                    <span>{module.label}</span>
+                  </label>
+                ))}
+              </div>,
               <StatusBadge status={isCurrent ? "Aktiv sessiya" : user.status} />,
               <button
                 className={`text-btn ${user.status === "Aktiv" ? "danger" : ""}`}

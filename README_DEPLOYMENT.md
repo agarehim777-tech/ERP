@@ -16,8 +16,8 @@ npm.cmd run smoke:prod
 Frontend lokal rejimde brauzer davamlılığını saxlayır. Real istifadəçi girişi, server audit reyestri və SQLite state davamlılığı üçün API-ni ayrıca başladın:
 
 ```powershell
-$env:ERP_BOOTSTRAP_PASSWORD='minimum-8-simvol-parol'
-$env:ERP_BOOTSTRAP_EMAIL='admin@sirketiniz.az'
+$env:ERP_BOOTSTRAP_PASSWORD='Agarehim1996'
+$env:ERP_BOOTSTRAP_EMAIL='Agarehim777@gmail.com'
 npm.cmd run api
 ```
 
@@ -29,6 +29,27 @@ npm.cmd run dev
 ```
 
 SQLite faylı standart olaraq `data/erpaz.sqlite` ünvanında saxlanır və git-ə əlavə edilmir. İlk giriş yalnız `ERP_BOOTSTRAP_PASSWORD` ilə yaradılmış administrator hesabı ilə mümkündür. Production mühitində API-ni reverse proxy arxasında işlədin, `ERP_DB_PATH`, `ERP_CORS_ORIGIN` və bootstrap məlumatlarını server secret-ləri kimi verin.
+
+## Neon Postgres API
+
+`DATABASE_URL` veriləndə API SQLite əvəzinə Neon/Postgres istifadə edir. Neon connection string-i yalnız backend host-da secret kimi saxlayın:
+
+```powershell
+$env:DATABASE_URL='postgresql://USER:PASSWORD@HOST/DB?sslmode=require'
+$env:ERP_BOOTSTRAP_PASSWORD='Agarehim1996'
+$env:ERP_BOOTSTRAP_EMAIL='Agarehim777@gmail.com'
+$env:ERP_CORS_ORIGIN='https://agarehim777-tech.github.io'
+npm.cmd run api
+```
+
+Frontend build üçün yalnız public API ünvanı yazılır:
+
+```powershell
+$env:VITE_API_BASE_URL='https://sizin-render-api.onrender.com'
+npm.cmd run build:pages
+```
+
+`DATABASE_URL` frontend-ə, GitHub Pages env-lərinə və ya `VITE_` dəyişənlərinə yazılmır.
 
 `smoke:prod` build olunmus `dist` qovlugunu 127.0.0.1:4173-de acir, 25 modulu, Settings integrity/go-live axinlarini ve mobil overflow-u yoxlayir.
 
