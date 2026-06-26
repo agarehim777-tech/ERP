@@ -201,7 +201,9 @@ async function auditCreditPayment(browser) {
     await createCreditSale(page);
     await selectModule(page, 9);
     const before = await readState(page);
-    await page.locator(".credit-payment-form button[type=submit]").click();
+    await page.locator(".credit-table-actions .icon-btn").first().click();
+    await page.locator(".credit-detail-modal-card .credit-payment-form").waitFor({ state: "visible" });
+    await page.locator(".credit-detail-modal-card .credit-payment-form button[type=submit]").click();
     await page.waitForTimeout(100);
     const after = await readState(page);
     const cashEntry = after.cashEntries?.[0];
@@ -492,6 +494,8 @@ async function auditHrStructure(browser) {
       !integrityState.integritySnapshot.issues?.some((issue) => issue.area === "HR"),
       "Healthy HR structure produced an integrity warning",
     );
+    const payrollExpense = integrityState.expenses?.find((expense) => expense.source === "HR Payroll");
+    assert(payrollExpense?.cashImpact === false, "HR payroll expense should not affect real cash balance");
     assert(errors.length === 0, `HR structure produced browser errors: ${errors.join(" | ")}`);
     return { employees: employees.length, selectedEmployee: "QA B2B Specialist", updatedSalary: updatedEmployee.salary, department: "QA New Department" };
   } finally {
