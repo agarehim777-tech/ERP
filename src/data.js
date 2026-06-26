@@ -108,7 +108,7 @@ export const initialState = {
       {
         id: "USR-ADMIN",
         name: "Administrator",
-        email: "admin@local",
+        email: "Agarehim777@gmail.com",
         role: "Super Admin",
         status: "Aktiv",
       },
