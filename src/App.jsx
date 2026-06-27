@@ -984,6 +984,26 @@ function isLowStockItem(item, productsByName = new Map()) {
   return reorderPoint > 0 && getAvailableQuantity(item) <= reorderPoint;
 }
 
+function isPurchaseOrderOpen(po = {}) {
+  const status = normalize(po.status);
+  return !status.includes("edildi") && !status.includes("imtina") && !status.includes("cancel");
+}
+
+function buildPurchaseOrderCoverage(purchaseOrders = []) {
+  return (purchaseOrders || []).filter(isPurchaseOrderOpen).reduce((map, po) => {
+    const key = normalize(po.product);
+    if (!key) return map;
+    const current = map.get(key) || { orderedQty: 0, amount: 0, count: 0, latest: null };
+    map.set(key, {
+      orderedQty: current.orderedQty + Number(po.qty || 0),
+      amount: current.amount + Number(po.amount || 0),
+      count: current.count + 1,
+      latest: current.latest || po,
+    });
+    return map;
+  }, new Map());
+}
+
 function buildWarehouseWmsRows(items, products = []) {
   const productsByName = buildProductLookup(products);
 
@@ -1023,21 +1043,39 @@ function getPreferredVendorName(product, vendors) {
   return vendors[0]?.name || "Vendor təyin edilməyib";
 }
 
-function buildProcurementRows(vendors, warehouseStock, orders, products = []) {
+function buildProcurementRows(vendors, warehouseStock, orders, products = [], purchaseOrders = []) {
   const productsByName = buildProductLookup(products);
+  const orderCoverage = buildPurchaseOrderCoverage(purchaseOrders);
   const byProduct = new Map();
 
+  products.filter((product) => product.status !== "Passiv").forEach((product) => {
+    byProduct.set(product.name, {
+      product: product.name,
+      total: 0,
+      reserved: 0,
+      price: Number(product.salePrice || product.costPrice || 0),
+      costPrice: Number(product.costPrice || 0),
+      salePrice: Number(product.salePrice || 0),
+      sku: product.sku || "",
+    });
+  });
+
   Object.values(warehouseStock).forEach((items) => {
-    items.forEach((item) => {
+    (items || []).forEach((item) => {
+      const catalogProduct = productsByName.get(normalize(item.product));
       const current = byProduct.get(item.product) || {
         product: item.product,
         total: 0,
         reserved: 0,
         price: Number(item.price || 0),
+        costPrice: Number(catalogProduct?.costPrice || 0),
+        salePrice: Number(catalogProduct?.salePrice || item.price || 0),
       };
       current.total += Number(item.total || 0);
       current.reserved += Number(item.reserved || 0);
       current.price = Number(item.price || current.price || 0);
+      current.costPrice = Number(current.costPrice || catalogProduct?.costPrice || 0);
+      current.salePrice = Number(current.salePrice || catalogProduct?.salePrice || item.price || 0);
       byProduct.set(item.product, current);
     });
   });
@@ -1057,6 +1095,17 @@ function buildProcurementRows(vendors, warehouseStock, orders, products = []) {
       const reorderPoint = getReorderPoint(item, productsByName);
       const targetQty = Math.max(demand, reorderPoint > 0 ? reorderPoint * 2 : 0);
       const recommendedQty = Math.max(0, targetQty - available);
+      const coverage = orderCoverage.get(normalize(item.product)) || { orderedQty: 0, amount: 0, count: 0 };
+      const unitCost = Number(item.costPrice || Math.round(Number(item.price || 0) * 0.76));
+      const orderGap = Math.max(0, recommendedQty - Number(coverage.orderedQty || 0));
+      const orderStatus =
+        recommendedQty <= 0
+          ? "Stok normal"
+          : coverage.orderedQty >= recommendedQty
+            ? "Sifariş verilib"
+            : coverage.orderedQty > 0
+              ? "Qismən sifarişdə"
+              : "Sifariş verilməyib";
       return {
         ...item,
         available,
@@ -1064,8 +1113,18 @@ function buildProcurementRows(vendors, warehouseStock, orders, products = []) {
         reorderPoint,
         vendor: getPreferredVendorName(item.product, vendors),
         recommendedQty,
-        estimatedCost: Math.round(recommendedQty * item.price * 0.76),
-        status: recommendedQty > 0 ? "PO hazırla" : reorderPoint > 0 && available <= reorderPoint ? "Nəzarət" : "Kifayət edir",
+        orderGap,
+        orderedQty: Number(coverage.orderedQty || 0),
+        openPoCount: Number(coverage.count || 0),
+        latestPoId: coverage.latest?.id || "",
+        unitCost,
+        estimatedCost: Math.round(orderGap * unitCost),
+        status:
+          recommendedQty > 0
+            ? orderStatus
+            : reorderPoint > 0 && available <= reorderPoint
+              ? "Nəzarət"
+              : "Kifayət edir",
       };
     })
     .sort((a, b) => b.recommendedQty - a.recommendedQty || a.available - b.available);
@@ -5683,27 +5742,45 @@ function App() {
   }
 
   function createPurchaseOrder(row) {
-    if (!requirePermission("vendors.po", "PO yaratmaq")) return;
+    if (!requirePermission("vendors.po", "PO yaratmaq")) return false;
 
-    const qty = Math.max(1, Math.round(Number(row.recommendedQty || 0)));
-    const warehouse = state.warehouses[0];
+    const qty = Math.max(1, Math.round(Number(row.orderGap || row.recommendedQty || row.qty || 0)));
+    const warehouse = state.warehouses.find((item) => item.id === row.warehouseId) || state.warehouses[0];
+    const catalogProduct = (state.products || []).find((item) => normalize(item.name) === normalize(row.product));
 
     if (!warehouse || !row.product) {
       notify("PO yaratmaq üçün məhsul və anbar məlumatı lazımdır.", "warning");
-      return;
+      return false;
     }
+
+    const unitCost = Math.max(
+      0,
+      Number(row.unitCost ?? row.costPrice ?? catalogProduct?.costPrice ?? Math.round(Number(row.price || catalogProduct?.salePrice || 0) * 0.76)),
+    );
+    const salePrice = Math.max(0, Number(row.salePrice ?? catalogProduct?.salePrice ?? row.price ?? unitCost));
+    const amount = Math.max(0, Math.round(Number(row.amount ?? qty * unitCost)));
+    const reorderPoint = Number(row.reorderPoint ?? catalogProduct?.reorderLevel ?? 0);
+    const availableAtOrder = Number(row.available ?? 0);
 
     const po = {
       id: `PO-${Date.now()}`,
       product: row.product,
       vendor: row.vendor,
+      supplierSource: row.supplierSource || row.factory || row.vendor,
+      procurementType: row.procurementType || "Zavod sifarişi",
       qty,
-      price: Number(row.price || 0),
-      amount: Number(row.estimatedCost || Math.round(qty * Number(row.price || 0) * 0.76)),
+      unitCost,
+      price: salePrice,
+      amount,
       warehouseId: warehouse.id,
       warehouseName: warehouse.name,
       status: "Təsdiq gözləyir",
-      date: baseFinanceDate,
+      date: row.date || baseFinanceDate,
+      expectedAt: row.expectedAt || "",
+      reorderPoint,
+      availableAtOrder,
+      orderedForMinimum: reorderPoint > 0 && availableAtOrder <= reorderPoint,
+      note: row.note || "",
     };
 
     setState((current) =>
@@ -5720,6 +5797,7 @@ function App() {
       ),
     );
     notify(`${po.id} yaradıldı və təsdiq gözləyir.`);
+    return true;
   }
 
   function approvePurchaseOrder(poId) {
@@ -5761,6 +5839,7 @@ function App() {
         ? current.expenses
         : [procurementExpense, ...current.expenses];
       const catalogProduct = (current.products || []).find((item) => normalize(item.name) === normalize(po.product));
+      const stockPrice = Number(po.price || catalogProduct?.salePrice || po.unitCost || 0);
 
       return auditCurrentState(
         {
@@ -5772,12 +5851,12 @@ function App() {
               current.warehouseStock?.[warehouseId] || [],
               po.product,
               po.qty,
-              po.price,
+              stockPrice,
               warehouseId,
               catalogProduct,
             ),
           },
-          stock: addStockToRows(current.stock, po.product, po.qty, po.price, "", catalogProduct),
+          stock: addStockToRows(current.stock, po.product, po.qty, stockPrice, "", catalogProduct),
           expenses: nextExpenses,
         },
         {
@@ -6133,6 +6212,7 @@ function App() {
               warehouseStock={state.warehouseStock}
               products={state.products || []}
               orders={state.orders}
+              purchaseOrders={state.purchaseOrders || []}
               selectedWarehouseId={selectedWarehouseId}
               query={query}
               onSelect={setSelectedWarehouseId}
@@ -6213,9 +6293,11 @@ function App() {
               vendors={filtered.vendors}
               warehouseStock={state.warehouseStock}
               products={state.products || []}
+              warehouses={state.warehouses}
               orders={state.orders}
               purchaseOrders={state.purchaseOrders || []}
               onCreatePurchaseOrder={createPurchaseOrder}
+              onOpenPurchaseOrderModal={() => setModal({ type: "purchaseOrder" })}
               onApprovePurchaseOrder={approvePurchaseOrder}
               canManagePo={can("vendors.po")}
             />
@@ -6359,11 +6441,13 @@ function App() {
           orderOptions={{
             customers: state.customers,
             products: state.products || [],
+            vendors: state.vendors || [],
             employees: state.employees || [],
             departments: state.departments || [],
             stock: state.stock,
             warehouses: state.warehouses,
             warehouseStock: state.warehouseStock,
+            purchaseOrders: state.purchaseOrders || [],
             sellers: state.employees.filter((employee) => employee.department === "Satış"),
           }}
           salesDefaults={{
@@ -6373,6 +6457,7 @@ function App() {
           onCreate={createRecord}
           onUpdateWarehouse={updateWarehouse}
           onReceiveStock={recordStockIntake}
+          onCreatePurchaseOrder={createPurchaseOrder}
           onImportWarehouseStock={importWarehouseStock}
           onUpdateProduct={updateProduct}
           onSaveFinanceAccount={saveFinanceAccount}
@@ -7722,9 +7807,10 @@ function getWarehouseBalanceStatus(available, reorderPoint) {
   return "Normal";
 }
 
-function buildWarehouseBalanceRows({ warehouses = [], warehouseStock = {}, products = [], view = "products", warehouseId = "all" }) {
+function buildWarehouseBalanceRows({ warehouses = [], warehouseStock = {}, products = [], purchaseOrders = [], view = "products", warehouseId = "all" }) {
   const warehouseById = new Map(warehouses.map((warehouse) => [warehouse.id, warehouse]));
   const productsByName = buildProductLookup(products);
+  const orderCoverage = buildPurchaseOrderCoverage(purchaseOrders);
   const createRow = (productName, catalogProduct = null) => ({
     key: catalogProduct?.id || normalize(productName),
     product: productName,
@@ -7738,6 +7824,9 @@ function buildWarehouseBalanceRows({ warehouses = [], warehouseStock = {}, produ
     reorderLevel: Number(catalogProduct?.reorderLevel || 0),
     total: 0,
     reserved: 0,
+    orderedQty: 0,
+    openPoCount: 0,
+    latestPoId: "",
     warehouseDistribution: [],
   });
 
@@ -7771,11 +7860,15 @@ function buildWarehouseBalanceRows({ warehouses = [], warehouseStock = {}, produ
     return [...rowsByProduct.values()]
       .map((row) => {
         const available = Math.max(0, row.total - row.reserved);
+        const coverage = orderCoverage.get(normalize(row.product)) || { orderedQty: 0, count: 0, latest: null };
         return {
           ...row,
           warehouseName: row.warehouseDistribution.length === 0 ? "—" : `${row.warehouseDistribution.length} anbar`,
           warehouseCount: row.warehouseDistribution.length,
           available,
+          orderedQty: Number(coverage.orderedQty || 0),
+          openPoCount: Number(coverage.count || 0),
+          latestPoId: coverage.latest?.id || "",
           status: getWarehouseBalanceStatus(available, row.reorderLevel),
           stockValue: row.total * row.costPrice,
           salesValue: row.total * row.salePrice,
@@ -7794,6 +7887,7 @@ function buildWarehouseBalanceRows({ warehouses = [], warehouseStock = {}, produ
         const reserved = Number(item.reserved || 0);
         const available = getAvailableQuantity(item);
         const reorderLevel = getReorderPoint(item, productsByName);
+        const coverage = orderCoverage.get(normalize(item.product)) || { orderedQty: 0, count: 0, latest: null };
         const costPrice = Number(catalogProduct?.costPrice || 0);
         const salePrice = Number(catalogProduct?.salePrice || item.price || 0);
         return {
@@ -7812,6 +7906,9 @@ function buildWarehouseBalanceRows({ warehouses = [], warehouseStock = {}, produ
           total: totalQty,
           reserved,
           available,
+          orderedQty: Number(coverage.orderedQty || 0),
+          openPoCount: Number(coverage.count || 0),
+          latestPoId: coverage.latest?.id || "",
           warehouseDistribution: [],
           status: getWarehouseBalanceStatus(available, reorderLevel),
           stockValue: totalQty * costPrice,
@@ -7846,7 +7943,7 @@ function filterWarehouseBalanceRows(rows, filters, globalQuery = "") {
 }
 
 function exportWarehouseBalanceCsv(rows, view) {
-  const headers = ["Kateqoriya", "Məhsul", "SKU", "Anbar", "Qalıq", "Minimum", "Rezerv", "Mövcud", "Vahid", "Maya", "Stok dəyəri", "Satış qiyməti", "Status"];
+  const headers = ["Kateqoriya", "Məhsul", "SKU", "Anbar", "Qalıq", "Minimum", "Rezerv", "Mövcud", "Sifarişdə", "Vahid", "Maya", "Stok dəyəri", "Satış qiyməti", "Status"];
   const escapeValue = (value) => `"${String(value ?? "").replaceAll('"', '""')}"`;
   const csvRows = rows.map((row) => [
     row.category,
@@ -7857,6 +7954,7 @@ function exportWarehouseBalanceCsv(rows, view) {
     row.reorderLevel,
     row.reserved,
     row.available,
+    row.orderedQty,
     row.unit,
     row.costPrice,
     row.stockValue,
@@ -8104,9 +8202,10 @@ function WarehouseBalanceTable({ rows, view, onEditProduct, onCreateProduct, onS
     total: summary.total + Number(row.total || 0),
     reserved: summary.reserved + Number(row.reserved || 0),
     available: summary.available + Number(row.available || 0),
+    orderedQty: summary.orderedQty + Number(row.orderedQty || 0),
     stockValue: summary.stockValue + Number(row.stockValue || 0),
     salesValue: summary.salesValue + Number(row.salesValue || 0),
-  }), { total: 0, reserved: 0, available: 0, stockValue: 0, salesValue: 0 });
+  }), { total: 0, reserved: 0, available: 0, orderedQty: 0, stockValue: 0, salesValue: 0 });
   const locationHeading = view === "products" ? "Anbarlar" : "Anbar";
 
   return (
@@ -8114,7 +8213,7 @@ function WarehouseBalanceTable({ rows, view, onEditProduct, onCreateProduct, onS
       <table className="warehouse-balance-table">
         <thead>
           <tr>
-            <th>Kateqoriya</th><th>Məhsul</th><th>SKU</th><th>{locationHeading}</th><th>Qalıq</th><th>Minimum</th><th>Rezerv</th><th>Mövcud</th><th>Vahid</th><th>Maya</th><th>Stok dəyəri</th><th>Satış</th><th>Status</th><th>Əməliyyat</th>
+            <th>Kateqoriya</th><th>Məhsul</th><th>SKU</th><th>{locationHeading}</th><th>Qalıq</th><th>Minimum</th><th>Rezerv</th><th>Mövcud</th><th>Sifarişdə</th><th>Vahid</th><th>Maya</th><th>Stok dəyəri</th><th>Satış</th><th>Status</th><th>Əməliyyat</th>
           </tr>
         </thead>
         <tbody>
@@ -8128,6 +8227,7 @@ function WarehouseBalanceTable({ rows, view, onEditProduct, onCreateProduct, onS
               <td>{row.reorderLevel || "—"}</td>
               <td>{row.reserved}</td>
               <td className={row.status === "Normal" ? "balance-qty good" : "balance-qty risk"}>{row.available}</td>
+              <td>{row.orderedQty > 0 ? <TwoLine title={`${row.orderedQty} ədəd`} subtitle={row.latestPoId || `${row.openPoCount} PO`} /> : "—"}</td>
               <td>{row.unit}</td>
               <td>{money(row.costPrice)}</td>
               <td>{money(row.stockValue)}</td>
@@ -8144,12 +8244,12 @@ function WarehouseBalanceTable({ rows, view, onEditProduct, onCreateProduct, onS
               </td>
             </tr>
           ))}
-          {rows.length === 0 && <tr><td colSpan="14" className="warehouse-balance-empty">Seçilmiş filtrə uyğun qalıq tapılmadı.</td></tr>}
+          {rows.length === 0 && <tr><td colSpan="15" className="warehouse-balance-empty">Seçilmiş filtrə uyğun qalıq tapılmadı.</td></tr>}
         </tbody>
         {rows.length > 0 && (
           <tfoot>
             <tr>
-              <td colSpan="4">Cəmi</td><td>{totals.total}</td><td>—</td><td>{totals.reserved}</td><td className="balance-qty good">{totals.available}</td><td>—</td><td>—</td><td>{money(totals.stockValue)}</td><td>{money(totals.salesValue)}</td><td>—</td><td>—</td>
+              <td colSpan="4">Cəmi</td><td>{totals.total}</td><td>—</td><td>{totals.reserved}</td><td className="balance-qty good">{totals.available}</td><td>{totals.orderedQty || "—"}</td><td>—</td><td>—</td><td>{money(totals.stockValue)}</td><td>{money(totals.salesValue)}</td><td>—</td><td>—</td>
             </tr>
           </tfoot>
         )}
@@ -8162,6 +8262,7 @@ function WarehouseBalancesWorkspace({
   warehouses,
   warehouseStock,
   products,
+  purchaseOrders = [],
   query,
   onReceiveStock,
   onOpenImport,
@@ -8181,20 +8282,20 @@ function WarehouseBalancesWorkspace({
     [products],
   );
   const balanceRows = useMemo(
-    () => buildWarehouseBalanceRows({ warehouses, warehouseStock, products, view, warehouseId: activeFilters.warehouseId }),
-    [warehouses, warehouseStock, products, view, activeFilters.warehouseId],
+    () => buildWarehouseBalanceRows({ warehouses, warehouseStock, products, purchaseOrders, view, warehouseId: activeFilters.warehouseId }),
+    [warehouses, warehouseStock, products, purchaseOrders, view, activeFilters.warehouseId],
   );
   const visibleRows = useMemo(
     () => filterWarehouseBalanceRows(balanceRows, activeFilters, query),
     [balanceRows, activeFilters, query],
   );
   const productRows = useMemo(
-    () => buildWarehouseBalanceRows({ warehouses, warehouseStock, products, view: "products", warehouseId: activeFilters.warehouseId }),
-    [warehouses, warehouseStock, products, activeFilters.warehouseId],
+    () => buildWarehouseBalanceRows({ warehouses, warehouseStock, products, purchaseOrders, view: "products", warehouseId: activeFilters.warehouseId }),
+    [warehouses, warehouseStock, products, purchaseOrders, activeFilters.warehouseId],
   );
   const warehouseRows = useMemo(
-    () => buildWarehouseBalanceRows({ warehouses, warehouseStock, products, view: "warehouses", warehouseId: activeFilters.warehouseId }),
-    [warehouses, warehouseStock, products, activeFilters.warehouseId],
+    () => buildWarehouseBalanceRows({ warehouses, warehouseStock, products, purchaseOrders, view: "warehouses", warehouseId: activeFilters.warehouseId }),
+    [warehouses, warehouseStock, products, purchaseOrders, activeFilters.warehouseId],
   );
 
   function changeDraftFilter(key, value) {
@@ -8309,6 +8410,7 @@ function WarehousePage({
   warehouseStock,
   products,
   orders,
+  purchaseOrders = [],
   selectedWarehouseId,
   query,
   onSelect,
@@ -8352,7 +8454,24 @@ function WarehousePage({
   );
   const warehouseList = visibleWarehouses.length > 0 ? visibleWarehouses : [];
   const visibleItems = filterWarehouseItems(filterRows(selectedItems, query), stockFilter);
-  const wmsRows = buildWarehouseWmsRows(visibleItems, products);
+  const purchaseOrderCoverage = useMemo(() => buildPurchaseOrderCoverage(purchaseOrders), [purchaseOrders]);
+  const wmsRows = buildWarehouseWmsRows(visibleItems, products).map((row) => {
+    const coverage = purchaseOrderCoverage.get(normalize(row.product)) || { orderedQty: 0, count: 0, latest: null };
+    return {
+      ...row,
+      orderedQty: Number(coverage.orderedQty || 0),
+      openPoCount: Number(coverage.count || 0),
+      latestPoId: coverage.latest?.id || "",
+      procurementStatus:
+        row.reorderQty <= 0
+          ? "Normal"
+          : Number(coverage.orderedQty || 0) >= row.reorderQty
+            ? "Sifariş verilib"
+            : Number(coverage.orderedQty || 0) > 0
+              ? "Qismən sifarişdə"
+              : "Sifariş verilməyib",
+    };
+  });
   const reorderRows = wmsRows.filter((row) => row.reorderQty > 0);
   const deliveryOrders = orders.filter((order) => {
     const canDeliver =
@@ -8379,6 +8498,7 @@ function WarehousePage({
         warehouses={warehouses}
         warehouseStock={warehouseStock}
         products={products}
+        purchaseOrders={purchaseOrders}
         query={query}
         onReceiveStock={onReceiveStock}
         onOpenImport={onOpenImport}
@@ -8477,7 +8597,7 @@ function WarehousePage({
           </div>
         </div>
         <DataTable
-          columns={["SKU", "Məhsul", "Barkod/QR", "Serial status", "Bin/Rəf", "İzləmə", "Sayım", "Satış üçün", "Reorder", "Status"]}
+          columns={["SKU", "Məhsul", "Barkod/QR", "Serial status", "Bin/Rəf", "İzləmə", "Sayım", "Satış üçün", "Reorder", "Sifarişdə", "Status"]}
           rows={wmsRows.slice(0, 8).map((row) => [
             <strong>{row.sku}</strong>,
             row.product,
@@ -8491,7 +8611,8 @@ function WarehousePage({
             row.cycleCount,
             row.available,
             row.reorderQty > 0 ? `${row.reorderQty} ədəd` : "Yoxdur",
-            <StatusBadge status={row.status} />,
+            row.orderedQty > 0 ? <TwoLine title={`${row.orderedQty} ədəd`} subtitle={row.latestPoId || `${row.openPoCount} PO`} /> : "—",
+            <StatusBadge status={row.procurementStatus || row.status} />,
           ])}
         />
       </Panel>
@@ -8499,7 +8620,7 @@ function WarehousePage({
       <Panel className="product-catalog-panel">
         <PanelHeader title="Məhsul kataloqu" subtitle="SKU, kateqoriya, qiymət və minimum stok nəzarəti" icon={Package} />
         <DataTable
-          columns={["SKU", "Məhsul", "Kateqoriya", "Alış", "Satış", "Minimum stok", "İzləmə", "Əməliyyat"]}
+          columns={["SKU", "Məhsul", "Kateqoriya", "Alış", "Satış", "Minimum stok", "Sifarişdə", "İzləmə", "Əməliyyat"]}
           rows={products.map((product) => [
             <strong>{product.sku}</strong>,
             product.name,
@@ -8507,6 +8628,10 @@ function WarehousePage({
             money(product.costPrice),
             money(product.salePrice),
             product.reorderLevel,
+            (() => {
+              const coverage = purchaseOrderCoverage.get(normalize(product.name));
+              return coverage?.orderedQty > 0 ? <TwoLine title={`${coverage.orderedQty} ədəd`} subtitle={coverage.latest?.id || `${coverage.count} PO`} /> : "—";
+            })(),
             product.serialTracked ? "IMEI / Serial" : "Batch",
             <button className="text-btn" onClick={() => onEditProduct(product.id)}>Redaktə</button>,
           ])}
@@ -8611,12 +8736,16 @@ function WarehousePage({
               </div>
               <WarehouseStockToolbar filter={stockFilter} setFilter={setStockFilter} />
               <DataTable
-                columns={["Məhsul", "Ümumi", "Rezerv", "Satış üçün", "Anbar paylanması", "Dəyər", "Risk"]}
+                columns={["Məhsul", "Ümumi", "Rezerv", "Satış üçün", "Sifarişdə", "Anbar paylanması", "Dəyər", "Risk"]}
                 rows={visibleItems.map((item) => [
                   <strong>{item.product}</strong>,
                   item.total,
                   item.reserved,
                   getAvailableQuantity(item),
+                  (() => {
+                    const coverage = purchaseOrderCoverage.get(normalize(item.product));
+                    return coverage?.orderedQty > 0 ? <TwoLine title={`${coverage.orderedQty} ədəd`} subtitle={coverage.latest?.id || `${coverage.count} PO`} /> : "—";
+                  })(),
                   <WarehouseDistribution distribution={item.distribution} />,
                   money(getAvailableQuantity(item) * item.price),
                   getAvailableQuantity(item) <= 3 ? <StatusBadge status="Aşağı stok" /> : "Normal",
@@ -8658,12 +8787,16 @@ function WarehousePage({
               </div>
               <WarehouseStockToolbar filter={stockFilter} setFilter={setStockFilter} />
               <DataTable
-                columns={["Məhsul", "Ümumi", "Rezerv", "Satış üçün", "Qiymət", "Dəyər", "Risk"]}
+                columns={["Məhsul", "Ümumi", "Rezerv", "Satış üçün", "Sifarişdə", "Qiymət", "Dəyər", "Risk"]}
                 rows={visibleItems.map((item) => [
                   <strong>{item.product}</strong>,
                   item.total,
                   item.reserved,
                   getAvailableQuantity(item),
+                  (() => {
+                    const coverage = purchaseOrderCoverage.get(normalize(item.product));
+                    return coverage?.orderedQty > 0 ? <TwoLine title={`${coverage.orderedQty} ədəd`} subtitle={coverage.latest?.id || `${coverage.count} PO`} /> : "—";
+                  })(),
                   money(item.price),
                   money(getAvailableQuantity(item) * item.price),
                   getAvailableQuantity(item) <= 3 ? <StatusBadge status="Aşağı stok" /> : "Normal",
@@ -10526,18 +10659,21 @@ function VendorsPage({
   vendors,
   warehouseStock = {},
   products = [],
+  warehouses = [],
   orders = [],
   purchaseOrders = [],
   onCreatePurchaseOrder,
+  onOpenPurchaseOrderModal,
   onApprovePurchaseOrder,
   canManagePo = false,
 }) {
   const procurementRows = useMemo(
-    () => buildProcurementRows(vendors, warehouseStock, orders, products),
-    [vendors, warehouseStock, orders, products],
+    () => buildProcurementRows(vendors, warehouseStock, orders, products, purchaseOrders),
+    [vendors, warehouseStock, orders, products, purchaseOrders],
   );
   const purchaseNeed = procurementRows.filter((row) => row.recommendedQty > 0);
   const procurementBudget = purchaseNeed.reduce((sum, row) => sum + Number(row.estimatedCost || 0), 0);
+  const openPoQty = purchaseOrders.filter(isPurchaseOrderOpen).reduce((sum, po) => sum + Number(po.qty || 0), 0);
   const vendorRiskCount = vendors.filter(
     (vendor) => normalize(vendor.status).includes("risk") || normalize(vendor.status).includes("aşağı"),
   ).length;
@@ -10569,6 +10705,18 @@ function VendorsPage({
           subtitle="Anbar qalığı və satış tempinə görə vendor üzrə sifariş tövsiyələri"
           icon={Package}
         />
+        <div className="procurement-actions">
+          <button
+            type="button"
+            className="primary-btn"
+            disabled={!canManagePo || products.length === 0 || warehouses.length === 0}
+            title={products.length === 0 || warehouses.length === 0 ? "Əvvəl məhsul və anbar yaradın" : "Zavoddan məhsul sifarişi yaradın"}
+            onClick={onOpenPurchaseOrderModal}
+          >
+            <Plus size={16} />
+            Zavod sifarişi
+          </button>
+        </div>
         <div className="procurement-summary-grid">
           <div>
             <span>Satınalma büdcəsi</span>
@@ -10581,27 +10729,29 @@ function VendorsPage({
             <small>Kvota və icra nəzarəti</small>
           </div>
           <div>
-            <span>Stok kifayətdir</span>
-            <strong>{procurementRows.filter((row) => row.status === "Kifayət edir").length}</strong>
-            <small>Satış üçün sağlam qalıq</small>
+            <span>Sifarişdə</span>
+            <strong>{openPoQty}</strong>
+            <small>Açıq PO üzrə yolda olan məhsul</small>
           </div>
         </div>
         <DataTable
-          columns={["Məhsul", "Vendor", "Satış", "Satış üçün", "Tövsiyə", "Büdcə", "Status", "PO"]}
+          columns={["Məhsul", "Vendor", "Satış", "Satış üçün", "Minimum", "Tövsiyə", "Sifarişdə", "Büdcə", "Status", "PO"]}
           rows={procurementRows.slice(0, 8).map((row) => [
             <strong>{row.product}</strong>,
             row.vendor,
             `${row.sold} ədəd`,
             `${row.available} ədəd`,
+            row.reorderPoint > 0 ? `${row.reorderPoint} ədəd` : "—",
             row.recommendedQty > 0 ? `${row.recommendedQty} ədəd` : "Yoxdur",
+            row.orderedQty > 0 ? <TwoLine title={`${row.orderedQty} ədəd`} subtitle={row.latestPoId || `${row.openPoCount} PO`} /> : "Yoxdur",
             row.estimatedCost > 0 ? money(row.estimatedCost) : "—",
             <StatusBadge status={row.status} />,
             <button
               className="text-btn"
-              disabled={!canManagePo}
+              disabled={!canManagePo || row.orderGap <= 0}
               onClick={() => onCreatePurchaseOrder(row)}
             >
-              PO yarat
+              {row.orderGap > 0 ? "PO yarat" : "Bağlıdır"}
             </button>,
           ])}
         />
@@ -10613,14 +10763,16 @@ function VendorsPage({
           icon={FileText}
         />
         <DataTable
-          columns={["PO", "Vendor", "Məhsul", "Anbar", "Say", "Məbləğ", "Status", "Əməliyyat"]}
+          columns={["PO", "Mənbə", "Məhsul", "Anbar", "Say", "Alış", "Məbləğ", "Gözlənən", "Status", "Əməliyyat"]}
           rows={purchaseOrders.map((po) => [
             <strong>{po.id}</strong>,
-            po.vendor,
+            <TwoLine title={po.vendor} subtitle={po.supplierSource || po.procurementType || "Vendor PO"} />,
             po.product,
             po.warehouseName,
             `${po.qty} ədəd`,
+            money(Number(po.unitCost || (Number(po.amount || 0) / Math.max(1, Number(po.qty || 1))) || 0)),
             money(po.amount),
+            po.expectedAt || "—",
             <StatusBadge status={po.status} />,
             po.status === "Təsdiq gözləyir" ? (
               <button className="text-btn" disabled={!canManagePo} onClick={() => onApprovePurchaseOrder(po.id)}>
@@ -12724,6 +12876,9 @@ function StatusBadge({ status }) {
 function statusClass(status) {
   const text = normalize(status);
   if (text.includes("kritik") || text.includes("bloker") || text.includes("yüksək")) return "danger";
+  if (text.includes("verilməyib")) return "danger";
+  if (text.includes("qismən sifarişdə")) return "warning";
+  if (text.includes("sifariş verilib")) return "ok";
   if (text.includes("xəbərdarlıq") || text.includes("nəzarət") || text.includes("hazırlanır") || text.includes("orta")) return "warning";
   if (text.includes("sağlam") || text.includes("test ok") || text.includes("hazır") || text.includes("aşağı")) return "ok";
   if (text.includes("ödənilib")) return "ok";
@@ -13474,6 +13629,185 @@ function StockIntakeModal({ warehouses, products = [], onClose, onSubmit }) {
               <Plus size={16} />
               Mədaxil et
             </button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function getProductProcurementSnapshot(productName, warehouseStock = {}, products = [], purchaseOrders = []) {
+  const product = (products || []).find((item) => item.name === productName);
+  const productsByName = buildProductLookup(products);
+  const orderCoverage = buildPurchaseOrderCoverage(purchaseOrders);
+  const stockRows = Object.values(warehouseStock).flatMap((items) => items || []).filter((item) => item.product === productName);
+  const total = stockRows.reduce((sum, item) => sum + Number(item.total || 0), 0);
+  const reserved = stockRows.reduce((sum, item) => sum + Number(item.reserved || 0), 0);
+  const available = Math.max(0, total - reserved);
+  const reorderPoint = getReorderPoint(
+    {
+      product: productName,
+      total,
+      reserved,
+      price: Number(product?.salePrice || stockRows[0]?.price || 0),
+      reorderLevel: product?.reorderLevel,
+    },
+    productsByName,
+  );
+  const targetQty = Math.max(reorderPoint > 0 ? reorderPoint * 2 : 0, 4);
+  const suggestedQty = Math.max(0, targetQty - available);
+  const coverage = orderCoverage.get(normalize(productName)) || { orderedQty: 0, count: 0, latest: null };
+  return {
+    product,
+    total,
+    reserved,
+    available,
+    reorderPoint,
+    targetQty,
+    suggestedQty,
+    orderedQty: Number(coverage.orderedQty || 0),
+    openPoCount: Number(coverage.count || 0),
+    latestPoId: coverage.latest?.id || "",
+    orderGap: Math.max(0, suggestedQty - Number(coverage.orderedQty || 0)),
+  };
+}
+
+function FactoryPurchaseOrderModal({
+  vendors = [],
+  warehouses = [],
+  products = [],
+  warehouseStock = {},
+  purchaseOrders = [],
+  onClose,
+  onSubmit,
+}) {
+  const productOptions = products.filter((product) => product.status !== "Passiv");
+  const firstProduct = productOptions[0] || null;
+  const initialSnapshot = getProductProcurementSnapshot(firstProduct?.name || "", warehouseStock, products, purchaseOrders);
+  const [values, setValues] = useState({
+    product: firstProduct?.name || "",
+    vendor: vendors[0]?.name || "",
+    supplierSource: vendors[0]?.name || "",
+    warehouseId: warehouses[0]?.id || "",
+    qty: Math.max(1, initialSnapshot.orderGap || initialSnapshot.suggestedQty || 1),
+    unitCost: Number(firstProduct?.costPrice || 0),
+    salePrice: Number(firstProduct?.salePrice || firstProduct?.costPrice || 0),
+    expectedAt: formatDateInput(addDays(currentBusinessDate, 14)),
+    note: "",
+  });
+  const snapshot = getProductProcurementSnapshot(values.product, warehouseStock, products, purchaseOrders);
+  const amount = Math.max(0, Math.round(Number(values.qty || 0) * Number(values.unitCost || 0)));
+
+  function updateValue(field, value) {
+    setValues((current) => ({ ...current, [field]: value }));
+  }
+
+  function selectProduct(productName) {
+    const nextProduct = products.find((product) => product.name === productName);
+    const nextSnapshot = getProductProcurementSnapshot(productName, warehouseStock, products, purchaseOrders);
+    setValues((current) => ({
+      ...current,
+      product: productName,
+      qty: Math.max(1, nextSnapshot.orderGap || nextSnapshot.suggestedQty || current.qty || 1),
+      unitCost: Number(nextProduct?.costPrice || current.unitCost || 0),
+      salePrice: Number(nextProduct?.salePrice || current.salePrice || nextProduct?.costPrice || 0),
+    }));
+  }
+
+  function submit(event) {
+    event.preventDefault();
+    const saved = onSubmit({
+      ...values,
+      qty: Number(values.qty || 0),
+      unitCost: Number(values.unitCost || 0),
+      salePrice: Number(values.salePrice || 0),
+      amount,
+      available: snapshot.available,
+      reorderPoint: snapshot.reorderPoint,
+      orderGap: snapshot.orderGap || Number(values.qty || 0),
+      procurementType: "Zavod sifarişi",
+    });
+    if (saved !== false) onClose();
+  }
+
+  return (
+    <div className="modal-shell" role="dialog" aria-modal="true">
+      <div className="modal-card factory-order-modal">
+        <div className="modal-head">
+          <div>
+            <h2>Zavod sifarişi yarat</h2>
+            <p>Məhsulun hardan alındığını, sayını, alış qiymətini və gözlənən mədaxil tarixini qeyd edin.</p>
+          </div>
+          <button className="icon-btn" onClick={onClose} aria-label="Pəncərəni bağla">
+            <X size={18} />
+          </button>
+        </div>
+        <form onSubmit={submit} className="modal-form">
+          <label className="full">
+            <span>Məhsul</span>
+            <select value={values.product} required onChange={(event) => selectProduct(event.target.value)}>
+              <option value="">Məhsul seçin</option>
+              {productOptions.map((product) => (
+                <option key={product.id} value={product.name}>{product.sku} · {product.name}</option>
+              ))}
+            </select>
+          </label>
+          <div className="factory-order-snapshot full">
+            <div><span>Satış üçün</span><strong>{snapshot.available}</strong></div>
+            <div><span>Minimum</span><strong>{snapshot.reorderPoint || "—"}</strong></div>
+            <div><span>Açıq sifariş</span><strong>{snapshot.orderedQty}</strong></div>
+            <div><span>Təklif</span><strong>{snapshot.orderGap || snapshot.suggestedQty || 1}</strong></div>
+          </div>
+          <label>
+            <span>Haradan alınır</span>
+            <input
+              list="factory-vendors"
+              value={values.supplierSource}
+              required
+              onChange={(event) => {
+                updateValue("supplierSource", event.target.value);
+                updateValue("vendor", event.target.value);
+              }}
+            />
+            <datalist id="factory-vendors">
+              {vendors.map((vendor) => <option key={vendor.name} value={vendor.name} />)}
+            </datalist>
+          </label>
+          <label>
+            <span>Anbar</span>
+            <select value={values.warehouseId} required onChange={(event) => updateValue("warehouseId", event.target.value)}>
+              {warehouses.map((warehouse) => (
+                <option key={warehouse.id} value={warehouse.id}>{warehouse.name} · {warehouse.city}</option>
+              ))}
+            </select>
+          </label>
+          <label>
+            <span>Miqdar</span>
+            <input type="number" min="1" value={values.qty} required onChange={(event) => updateValue("qty", event.target.value)} />
+          </label>
+          <label>
+            <span>Alış qiyməti</span>
+            <input type="number" min="0" step="0.01" value={values.unitCost} required onChange={(event) => updateValue("unitCost", event.target.value)} />
+          </label>
+          <label>
+            <span>Stok/satış qiyməti</span>
+            <input type="number" min="0" step="0.01" value={values.salePrice} required onChange={(event) => updateValue("salePrice", event.target.value)} />
+          </label>
+          <label>
+            <span>Gözlənən tarix</span>
+            <input type="date" value={values.expectedAt} onChange={(event) => updateValue("expectedAt", event.target.value)} />
+          </label>
+          <label className="full">
+            <span>Qeyd</span>
+            <input value={values.note} placeholder="Zavod partiyası, invoice və ya çatdırılma qeydi" onChange={(event) => updateValue("note", event.target.value)} />
+          </label>
+          <div className="factory-order-total full">
+            <span>Toplam alış məbləği</span>
+            <strong>{money(amount)}</strong>
+          </div>
+          <div className="modal-actions">
+            <button type="button" className="secondary-btn" onClick={onClose}>Ləğv et</button>
+            <button type="submit" className="primary-btn"><Plus size={16} /> PO yarat</button>
           </div>
         </form>
       </div>
@@ -14470,6 +14804,7 @@ function CreateModal({
   onCreate,
   onUpdateWarehouse,
   onReceiveStock,
+  onCreatePurchaseOrder,
   onImportWarehouseStock,
   onUpdateProduct,
   onSaveFinanceAccount,
@@ -14513,6 +14848,20 @@ function CreateModal({
 
   if (type === "warehouseImport") {
     return <WarehouseImportModal warehouses={orderOptions.warehouses} onClose={onClose} onImport={onImportWarehouseStock} />;
+  }
+
+  if (type === "purchaseOrder") {
+    return (
+      <FactoryPurchaseOrderModal
+        vendors={orderOptions.vendors}
+        warehouses={orderOptions.warehouses}
+        products={orderOptions.products}
+        warehouseStock={orderOptions.warehouseStock}
+        purchaseOrders={orderOptions.purchaseOrders}
+        onClose={onClose}
+        onSubmit={onCreatePurchaseOrder}
+      />
+    );
   }
 
   if (type === "hr") {

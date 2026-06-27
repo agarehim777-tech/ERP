@@ -263,7 +263,14 @@ async function auditPurchaseOrder(browser) {
     await vendorModal.locator('button[type="submit"]').click();
 
     const before = await readState(page);
-    await page.locator(".procurement-panel button.text-btn").first().click();
+    await page.getByRole("button", { name: "Zavod sifarişi" }).click();
+    const poModal = page.locator('[role="dialog"]');
+    await poModal.locator("input").nth(0).fill("QA Vendor");
+    await poModal.locator("input").nth(1).fill("6");
+    await poModal.locator("input").nth(2).fill("50");
+    await poModal.locator("input").nth(3).fill("120");
+    await poModal.locator("input").nth(5).fill("QA factory audit order");
+    await poModal.locator('button[type="submit"]').click();
     await page.waitForTimeout(75);
     const created = await readState(page);
     const po = created.purchaseOrders?.[0];

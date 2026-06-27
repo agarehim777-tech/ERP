@@ -5560,6 +5560,46 @@ tr:hover td {
   width: min(680px, calc(100vw - 32px));
 }
 
+.factory-order-modal {
+  width: min(760px, calc(100vw - 32px));
+}
+
+.factory-order-snapshot {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.factory-order-snapshot div,
+.factory-order-total {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  padding: 11px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fbfcfe;
+}
+
+.factory-order-snapshot span,
+.factory-order-total span {
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.factory-order-snapshot strong,
+.factory-order-total strong {
+  color: var(--text);
+  font-size: 19px;
+  line-height: 1.15;
+}
+
+.factory-order-total {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
 .hr-delete-summary {
   display: grid;
   gap: 8px;
@@ -6268,7 +6308,7 @@ tr:hover td {
 .finance-currency-panel table,
 .api-console-panel table,
 .hr-planning-panel table {
-  min-width: 920px;
+  min-width: 1060px;
 }
 
 .modal-card.customer-360-modal-card {
@@ -6687,6 +6727,12 @@ tr:hover td {
 .procurement-summary-grid,
 .hr-planning-summary {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.procurement-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin: -4px 0 14px;
 }
 
 .wms-summary-grid div,
@@ -7189,6 +7235,7 @@ tr:hover td {
     .credit-detail-layout,
     .credit-detail-records,
     .customer-360-credit-card dl,
+    .factory-order-snapshot,
     .credit-list-row,
     .credit-payment-inputs,
     .credit-payment-preview,
