@@ -6213,6 +6213,36 @@ tr:hover td {
   white-space: nowrap;
 }
 
+.crm-customer-link,
+.crm-customer-name-btn {
+  border: 0;
+  color: var(--accent-strong);
+  background: transparent;
+  padding: 0;
+  text-align: left;
+  font: inherit;
+  font-weight: 820;
+}
+
+.crm-customer-link {
+  overflow: hidden;
+  font-size: 15px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.crm-customer-name-btn {
+  display: inline-grid;
+  min-width: 0;
+  max-width: 100%;
+}
+
+.crm-customer-name-btn:hover,
+.crm-customer-link:hover {
+  color: var(--accent);
+  text-decoration: underline;
+}
+
 .crm-action-row {
   min-height: 58px;
   display: flex;
@@ -6239,6 +6269,141 @@ tr:hover td {
 .api-console-panel table,
 .hr-planning-panel table {
   min-width: 920px;
+}
+
+.modal-card.customer-360-modal-card {
+  width: min(1180px, calc(100vw - 28px));
+  max-height: calc(100vh - 32px);
+  background: #f8fafc;
+}
+
+.modal-head.customer-360-head {
+  align-items: center;
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: rgba(255, 255, 255, 0.96);
+  backdrop-filter: blur(10px);
+}
+
+.customer-360-body {
+  display: grid;
+  gap: 14px;
+  padding: 16px;
+}
+
+.customer-360-summary {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.customer-360-summary div {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+  padding: 13px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: white;
+}
+
+.customer-360-summary span,
+.customer-360-credit-card span,
+.customer-360-credit-card dt {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.customer-360-summary strong {
+  color: var(--text);
+  font-size: 22px;
+  line-height: 1.1;
+}
+
+.customer-360-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(310px, 360px);
+  gap: 14px;
+  align-items: start;
+}
+
+.customer-360-main,
+.customer-360-side,
+.customer-360-credit-list {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+}
+
+.customer-360-side {
+  position: sticky;
+  top: 76px;
+}
+
+.customer-360-section {
+  overflow: hidden;
+}
+
+.customer-360-section .table-wrap {
+  border-right: 0;
+  border-bottom: 0;
+  border-left: 0;
+  border-radius: 0;
+}
+
+.customer-360-section table {
+  min-width: 760px;
+}
+
+.customer-360-credit-card {
+  display: grid;
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: white;
+}
+
+.customer-360-credit-card > div:first-child {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.customer-360-credit-card strong,
+.customer-360-credit-card span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.customer-360-credit-card dl {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  margin: 0;
+}
+
+.customer-360-credit-card dl div {
+  min-width: 0;
+  display: grid;
+  gap: 3px;
+  padding: 8px;
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  background: #fbfcfe;
+}
+
+.customer-360-credit-card dd {
+  overflow: hidden;
+  margin: 0;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 820;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .barcode-badge {
@@ -6658,11 +6823,13 @@ tr:hover td {
   }
 
   .credit-detail-layout,
-  .credit-detail-records {
+  .credit-detail-records,
+  .customer-360-grid {
     grid-template-columns: 1fr;
   }
 
-  .credit-detail-aside {
+  .credit-detail-aside,
+  .customer-360-side {
     position: static;
   }
 
@@ -6883,6 +7050,7 @@ tr:hover td {
   .executive-insight-grid,
   .aging-bucket-grid,
   .db-status-grid,
+  .customer-360-summary,
   .automation-rule-list {
     grid-template-columns: 1fr;
   }
@@ -7020,6 +7188,7 @@ tr:hover td {
     .credit-detail-values,
     .credit-detail-layout,
     .credit-detail-records,
+    .customer-360-credit-card dl,
     .credit-list-row,
     .credit-payment-inputs,
     .credit-payment-preview,

@@ -762,6 +762,96 @@ function getCustomerOrders(customer, orders) {
   );
 }
 
+function getCustomerContracts(customer, contracts = []) {
+  return contracts.filter(
+    (contract) => contract.fin === customer.fin || normalize(contract.customer) === normalize(customer.name),
+  );
+}
+
+function getOrderCredit(order, credits = []) {
+  return credits.find(
+    (credit) =>
+      credit.orderId === order.id ||
+      credit.id === order.creditId ||
+      (order.contractId && credit.contractId === order.contractId),
+  );
+}
+
+function getOrderProductRows(order) {
+  if (Array.isArray(order.productLines) && order.productLines.length > 0) {
+    return order.productLines.map((line) => {
+      const qty = Math.max(1, Number(line.qty || 1));
+      const amount = Math.max(0, Number(line.price || 0) * qty);
+      return {
+        product: line.product || order.products || "Cihaz qeyd edilməyib",
+        qty,
+        amount,
+        serials: Array.isArray(line.serials) ? line.serials.filter(Boolean) : [],
+      };
+    });
+  }
+
+  return [
+    {
+      product: order.products || "Cihaz qeyd edilməyib",
+      qty: 1,
+      amount: Number(order.amount || 0),
+      serials: [],
+    },
+  ];
+}
+
+function buildCustomer360(customer, { credits = [], orders = [], contracts = [] }) {
+  const customerOrders = getCustomerOrders(customer, orders);
+  const customerCredits = getCustomerRelatedCredits(customer, credits);
+  const customerContracts = getCustomerContracts(customer, contracts);
+  const contractByOrderId = new Map(customerContracts.filter((contract) => contract.orderId).map((contract) => [contract.orderId, contract]));
+  const contractById = new Map(customerContracts.map((contract) => [contract.id, contract]));
+
+  const deviceRows = customerOrders.flatMap((order) => {
+    const linkedCredit = getOrderCredit(order, customerCredits);
+    const plan = linkedCredit ? getCreditDisplayPlan(linkedCredit) : null;
+    const paidTotal = linkedCredit ? getCreditPaidTotal(plan) : Number(order.paid || 0);
+    const balanceTotal = linkedCredit ? Number(plan.balance || 0) : getOrderBalance(order);
+    const lineRows = getOrderProductRows(order);
+    const lineTotal = lineRows.reduce((sum, line) => sum + Number(line.amount || 0), 0) || Number(order.amount || 0) || 1;
+
+    return lineRows.map((line) => {
+      const lineAmount = Number(line.amount || 0) || Math.round(Number(order.amount || 0) / Math.max(1, lineRows.length));
+      const ratio = Math.min(1, Math.max(0, lineAmount / lineTotal));
+      const contract = contractByOrderId.get(order.id) || contractById.get(order.contractId);
+      return {
+        id: `${order.id}-${line.product}-${line.qty}`,
+        product: line.product,
+        qty: line.qty,
+        serials: line.serials,
+        orderId: order.id,
+        contractId: order.contractId || contract?.id || linkedCredit?.contractId || "—",
+        creditId: linkedCredit?.id || "—",
+        date: order.date,
+        status: order.status,
+        amount: Math.round(lineAmount),
+        paid: Math.round(paidTotal * ratio),
+        balance: Math.round(balanceTotal * ratio),
+      };
+    });
+  });
+
+  const totalPurchased = deviceRows.reduce((sum, row) => sum + Number(row.amount || 0), 0);
+  const totalPaid = deviceRows.reduce((sum, row) => sum + Number(row.paid || 0), 0);
+  const totalBalance = deviceRows.reduce((sum, row) => sum + Number(row.balance || 0), 0);
+
+  return {
+    orders: customerOrders,
+    credits: customerCredits,
+    contracts: customerContracts,
+    devices: deviceRows,
+    totalPurchased,
+    totalPaid,
+    totalBalance,
+  };
+}
+
 function getLatestOrder(orders) {
   return [...orders].sort((a, b) => {
     const dateA = parsePaymentDate(a.date)?.getTime() || 0;
@@ -6017,7 +6107,14 @@ function App() {
               setActive={choosePage}
             />
           )}
-          {active === "crm" && <CrmPage customers={filtered.customers} credits={creditRecords} orders={state.orders} />}
+          {active === "crm" && (
+            <CrmPage
+              customers={filtered.customers}
+              credits={creditRecords}
+              orders={state.orders}
+              contracts={state.contracts}
+            />
+          )}
           {active === "sales" && (
             <SalesPage
               orders={filtered.orders}
@@ -6655,9 +6752,10 @@ function DashboardPage({
   );
 }
 
-function CrmPage({ customers, credits, orders = [] }) {
+function CrmPage({ customers, credits, orders = [], contracts = [] }) {
   const [pipelineFilter, setPipelineFilter] = useState("Hamısı");
   const [selectedPipelineId, setSelectedPipelineId] = useState(null);
+  const [selectedCustomerFin, setSelectedCustomerFin] = useState("");
   const delayed = customers.filter((customer) => customer.delay > 0);
   const platin = customers.filter((customer) => customer.category === "Platin");
   const creditsByCustomer = customers.reduce((map, customer) => {
@@ -6672,6 +6770,7 @@ function CrmPage({ customers, credits, orders = [] }) {
   const visiblePipeline = pipelineRows.filter((row) => matchesCrmPipelineFilter(row, pipelineFilter));
   const pipelineValue = pipelineRows.reduce((sum, row) => sum + Number(row.value || 0), 0);
   const selectedPipeline = pipelineRows.find((row) => row.id === selectedPipelineId) || null;
+  const selectedCustomer = customers.find((customer) => customer.fin === selectedCustomerFin) || null;
   const portalReady = pipelineRows.filter((row) => row.activeCreditCount > 0 || row.openOrders > 0);
   const nextBestActions = [...pipelineRows]
     .sort((a, b) => {
@@ -6781,7 +6880,13 @@ function CrmPage({ customers, credits, orders = [] }) {
             <div className="crm-pipeline-selection" aria-live="polite">
               <div>
                 <span>Secilmis musteri</span>
-                <strong>{selectedPipeline.customer.name}</strong>
+                <button
+                  type="button"
+                  className="crm-customer-link"
+                  onClick={() => setSelectedCustomerFin(selectedPipeline.customer.fin)}
+                >
+                  {selectedPipeline.customer.name}
+                </button>
                 <small>FIN {selectedPipeline.customer.fin}</small>
               </div>
               <div>
@@ -6823,7 +6928,13 @@ function CrmPage({ customers, credits, orders = [] }) {
         <DataTable
           columns={["Müştəri", "Aktiv kredit", "Qalıq", "Növbəti ödəniş", "Açıq sifariş", "Portal statusu"]}
           rows={portalReady.map((row) => [
-            <TwoLine title={row.customer.name} subtitle={`FİN ${row.customer.fin}`} />,
+            <button
+              type="button"
+              className="crm-customer-name-btn"
+              onClick={() => setSelectedCustomerFin(row.customer.fin)}
+            >
+              <TwoLine title={row.customer.name} subtitle={`FİN ${row.customer.fin}`} />
+            </button>,
             row.activeCreditCount,
             money(row.totalBalance),
             row.nextPayment ? `${money(row.nextPayment.amount)} · ${row.nextPayment.due}` : "Yoxdur",
@@ -6841,7 +6952,13 @@ function CrmPage({ customers, credits, orders = [] }) {
 
             return [
               <strong>{customer.fin}</strong>,
-              customer.name,
+              <button
+                type="button"
+                className="crm-customer-name-btn"
+                onClick={() => setSelectedCustomerFin(customer.fin)}
+              >
+                {customer.name}
+              </button>,
               customer.phone,
               <StatusBadge status={customer.category} />,
               money(customer.limit),
@@ -6852,6 +6969,15 @@ function CrmPage({ customers, credits, orders = [] }) {
           })}
         />
       </Panel>
+      {selectedCustomer ? (
+        <Customer360Modal
+          customer={selectedCustomer}
+          credits={credits}
+          orders={orders}
+          contracts={contracts}
+          onClose={() => setSelectedCustomerFin("")}
+        />
+      ) : null}
     </div>
   );
 }
@@ -6871,6 +6997,127 @@ function CustomerCreditHistory({ credits }) {
       <span>
         {latest.id} · {latestPlan.months} ay · {money(latestPlan.monthly)}/ay
       </span>
+    </div>
+  );
+}
+
+function Customer360Modal({ customer, credits, orders, contracts, onClose }) {
+  const profile = useMemo(
+    () => buildCustomer360(customer, { credits, orders, contracts }),
+    [customer, credits, orders, contracts],
+  );
+
+  return (
+    <div className="modal-shell customer-360-modal-shell" role="dialog" aria-modal="true" aria-labelledby="customer-360-title">
+      <div className="modal-card customer-360-modal-card">
+        <div className="modal-head customer-360-head">
+          <div>
+            <h2 id="customer-360-title">{customer.name}</h2>
+            <p>FİN {customer.fin} üzrə müqavilə, cihaz və ödəniş 360 baxışı</p>
+          </div>
+          <button className="icon-btn" type="button" onClick={onClose} aria-label="Pəncərəni bağla">
+            <X size={18} />
+          </button>
+        </div>
+
+        <div className="customer-360-body">
+          <section className="customer-360-summary">
+            <div>
+              <span>Alış dəyəri</span>
+              <strong>{money(profile.totalPurchased)}</strong>
+            </div>
+            <div>
+              <span>Ödənilib</span>
+              <strong>{money(profile.totalPaid)}</strong>
+            </div>
+            <div>
+              <span>Qalıq</span>
+              <strong>{money(profile.totalBalance)}</strong>
+            </div>
+            <div>
+              <span>Müqavilə / cihaz</span>
+              <strong>{profile.contracts.length} / {profile.devices.length}</strong>
+            </div>
+          </section>
+
+          <section className="customer-360-grid">
+            <div className="customer-360-main">
+              <Panel className="customer-360-section">
+                <PanelHeader title="Müqavilələr" subtitle="Müştəriyə bağlı satış müqavilələri və sifarişlər" icon={FileText} />
+                <DataTable
+                  columns={["Müqavilə", "Sifariş", "Cihaz", "Məbləğ", "Status"]}
+                  rows={profile.contracts.map((contract) => [
+                    <strong>{contract.id}</strong>,
+                    contract.orderId || "—",
+                    contract.product || "Cihaz qeyd edilməyib",
+                    money(contract.amount),
+                    <StatusBadge status={contract.status || "Hazırlanır"} />,
+                  ])}
+                />
+              </Panel>
+
+              <Panel className="customer-360-section">
+                <PanelHeader title="Alınan cihazlar" subtitle="Hər cihaz üzrə ödənilən və qalan məbləğ" icon={Package} />
+                <DataTable
+                  columns={["Cihaz", "Müqavilə", "Sifariş", "Məbləğ", "Ödənilib", "Qalıq", "Status"]}
+                  rows={profile.devices.map((device) => [
+                    <TwoLine title={device.product} subtitle={`${device.qty} ədəd${device.serials.length ? ` · ${device.serials.join(", ")}` : ""}`} />,
+                    device.contractId,
+                    device.orderId,
+                    money(device.amount),
+                    money(device.paid),
+                    <strong>{money(device.balance)}</strong>,
+                    <StatusBadge status={device.status || "Aktiv"} />,
+                  ])}
+                />
+              </Panel>
+            </div>
+
+            <aside className="customer-360-side">
+              <Panel className="customer-360-section">
+                <PanelHeader title="Kredit planları" subtitle="Aylıq ödəniş və qalıq izləmə" icon={CreditCard} />
+                <div className="customer-360-credit-list">
+                  {profile.credits.length === 0 ? (
+                    <EmptyState title="Aktiv kredit yoxdur" />
+                  ) : (
+                    profile.credits.map((credit) => {
+                      const plan = getCreditDisplayPlan(credit);
+                      const paymentState = getCreditPaymentState(credit, plan);
+                      return (
+                        <div className="customer-360-credit-card" key={credit.id}>
+                          <div>
+                            <strong>{credit.contractId || credit.id}</strong>
+                            <StatusBadge status={getCreditManagementStatus({ credit, paymentState })} />
+                          </div>
+                          <span>{credit.device || credit.product || "Cihaz qeyd edilməyib"}</span>
+                          <dl>
+                            <div>
+                              <dt>Aylıq</dt>
+                              <dd>{money(paymentState.nextInstallment?.amount || plan.monthly)}</dd>
+                            </div>
+                            <div>
+                              <dt>Ödənilib</dt>
+                              <dd>{money(getCreditPaidTotal(plan))}</dd>
+                            </div>
+                            <div>
+                              <dt>Qalıq</dt>
+                              <dd>{money(plan.balance)}</dd>
+                            </div>
+                            <div>
+                              <dt>Növbəti</dt>
+                              <dd>{paymentState.nextInstallment?.due || credit.next || "—"}</dd>
+                            </div>
+                          </dl>
+                        </div>
+                      );
+                    })
+                  )}
+                </div>
+              </Panel>
+            </aside>
+          </section>
+        </div>
+      </div>
     </div>
   );
 }
