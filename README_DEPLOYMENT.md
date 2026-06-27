@@ -51,6 +51,26 @@ npm.cmd run build:pages
 
 `DATABASE_URL` frontend-ə, GitHub Pages env-lərinə və ya `VITE_` dəyişənlərinə yazılmır.
 
+### GitHub Pages + real backend sync
+
+GitHub Pages build-i statik frontend-dir. Lokal `http://127.0.0.1:5174` üzərində yaradılan müştəri və sifarişlərin `https://agarehim777-tech.github.io/ERP/` səhifəsində görünməsi üçün hər iki frontend eyni backend API-yə qoşulmalıdır.
+
+GitHub repository `Settings -> Secrets and variables -> Actions -> Variables` hissəsində bunları yaradın:
+
+```text
+VITE_API_BASE_URL=https://sizin-render-api.onrender.com
+VITE_DB_PROVIDER=postgres
+VITE_AUDIT_MODE=immutable
+```
+
+Render API servisində `ERP_CORS_ORIGIN` dəyəri GitHub Pages origin-i ilə uyğun olmalıdır:
+
+```text
+ERP_CORS_ORIGIN=https://agarehim777-tech.github.io
+```
+
+Əgər `VITE_API_BASE_URL` boş qalsa, GitHub Pages backend-ə qoşulmur və məlumatları yalnız həmin domenin browser storage-ində saxlayır. Bu halda lokalda yaradılan müştərilər GitHub Pages-də görünməyəcək.
+
 ### Render API service
 
 Render-də backend üçün static frontend Dockerfile deyil, Node API servisi işləməlidir.

@@ -35,9 +35,9 @@ jobs:
       - name: Build
         run: npm run build:pages
         env:
-          VITE_API_BASE_URL: ""
-          VITE_DB_PROVIDER: local
-          VITE_AUDIT_MODE: local
+          VITE_API_BASE_URL: ${{ vars.VITE_API_BASE_URL }}
+          VITE_DB_PROVIDER: ${{ vars.VITE_DB_PROVIDER || 'postgres' }}
+          VITE_AUDIT_MODE: ${{ vars.VITE_AUDIT_MODE || 'immutable' }}
           VITE_RELEASE_VERSION: github-pages
 
       - name: Upload Pages artifact
